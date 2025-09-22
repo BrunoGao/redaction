@@ -1,0 +1,36 @@
+# Core dependencies
+PyYAML>=6.0
+urllib3>=1.26.0
+
+# Optional dependencies for enhanced functionality
+# Uncomment as needed
+
+# For high-performance JSON parsing
+# orjson>=3.8.0
+
+# For advanced regex operations
+# regex>=2023.0.0
+
+# For parallel processing
+# multiprocessing-logging>=0.3.4
+
+# For monitoring and metrics
+# prometheus-client>=0.16.0
+
+# For configuration validation
+# jsonschema>=4.17.0
+
+# For encrypted salt storage
+# cryptography>=40.0.0
+
+# For database-backed caching
+# redis>=4.5.0
+
+# For AWS integration
+# boto3>=1.26.0
+
+# For Google Cloud integration
+# google-cloud-storage>=2.8.0
+
+# For Azure integration
+# azure-storage-blob>=12.14.0

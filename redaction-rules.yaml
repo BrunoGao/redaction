@@ -1,0 +1,204 @@
+version: 2025-09-22
+salt_env: REDACT_SALT
+salt_version: v1
+max_line_len: 262144
+
+# Keys that should always be redacted regardless of context
+key_denylist:
+  - password
+  - passwd
+  - pwd
+  - secret
+  - client_secret
+  - signing_secret
+  - token
+  - access_token
+  - refresh_token
+  - id_token
+  - session
+  - sessionid
+  - session_token
+  - cookie
+  - set-cookie
+  - authorization
+  - api_key
+  - apikey
+  - x-api-key
+  - private_key
+  - ssh_private_key
+  - rsa_private_key
+  - webhook
+  - webhook_url
+  - jwt
+  - license
+  - npm_token
+  - yarn_token
+  - npm_auth_token
+  - aws_secret_access_key
+  - aws_session_token
+  - gcp_sa_key
+  - kube_token
+  - kubeconfig
+  - db_password
+  - redis_password
+  - smtp_password
+
+# Redaction rules in order of processing
+actions:
+
+  # URL query parameter redaction
+  - name: url-params
+    type: regex
+    action: replace_query_value
+    url_param_keys:
+      - token
+      - access_token
+      - refresh_token
+      - id_token
+      - code
+      - key
+      - api_key
+      - apikey
+      - x-api-key
+      - signature
+      - sig
+      - auth
+      - authorization
+      - jwt
+      - session
+      - sessionid
+
+  # Strong removal for critical secrets
+  - name: secrets-strong-remove
+    type: regex
+    action: remove
+    patterns:
+      # Private keys (RSA, EC, SSH, etc.)
+      - '-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----'
+      - '-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----'
+      - '-----BEGIN OPENSSH PRIVATE KEY-----[\s\S]*?-----END OPENSSH PRIVATE KEY-----'
+      # Service account tokens and kubeconfig
+      - '(?is)"service-account-token"|kubeconfig|KUBECONFIG:\s*{\s*[^}]+}'
+      # Authorization headers
+      - '(?i)authorization"\s*:\s*"Bearer\s+[A-Za-z0-9\-._~+/]+=*'
+      - '(?i)authorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]+=*'
+      - '(?i)authorization:\s*Basic\s+[A-Za-z0-9+/=]+'
+      - '(?i)authorization"\s*:\s*"Basic\s+[A-Za-z0-9+/=]+'
+      # Cookies
+      - '(?i)\bset-cookie\b\s*:\s*[^;,\r\n]+'
+      - '(?i)\bcookie\b\s*:\s*[^\r\n]+'
+      # Auth tokens
+      - '(?i)_auth"?\s*[:=]\s*"?[A-Za-z0-9+/=]{20,}"?'
+      - '(?i)npm[_-]?auth[_-]?token"?\s*[:=]\s*"?[A-Za-z0-9]{8,}"?'
+
+  # JSON key-based redaction
+  - name: json-key-deny
+    type: json_key
+    rules:
+      # Complete removal for high-risk fields
+      - keys: [password, passwd, pwd, private_key, ssh_private_key, rsa_private_key, cookie, set-cookie]
+        action: remove
+      # Mask and hash for tokens and secrets
+      - keys: [token, access_token, refresh_token, id_token, session, sessionid, session_token, jwt, api_key, apikey, x-api-key, client_secret, signing_secret, aws_secret_access_key, aws_session_token, gcp_sa_key, kube_token, license, npm_token, yarn_token, npm_auth_token, db_password, redis_password, smtp_password]
+        action: mask_and_hash
+      # Mask and hash for PII
+      - keys: [email, user_email, mail, phone, mobile, tel, id_card, idNumber, bankcard, credit_card, device_id, imei, iccid, mac_address, uuid, user_id, username]
+        action: mask_and_hash
+
+  # PII pattern-based masking
+  - name: pii-mask
+    type: regex
+    action: mask
+    rules:
+      # Chinese mobile phone numbers
+      - field_hint: phone_cn
+        pattern: '(\b1[3-9]\d)(\d{4})(\d{4}\b)'
+        replacement: '$1****$3'
+      # Email addresses
+      - field_hint: email
+        pattern: '([A-Za-z0-9._%+\-])[^@]*(@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})'
+        replacement: '$1***$2'
+      # Chinese ID cards
+      - field_hint: idcard_cn
+        pattern: '(\b\d{6})\d{8}(\w{4}\b)'
+        replacement: '$1********$2'
+      # Bank cards
+      - field_hint: bankcard
+        pattern: '(\b\d{6})\d{6,9}(\d{4}\b)'
+        replacement: '$1******$2'
+      # IMEI numbers
+      - field_hint: imei
+        pattern: '(\b\d{2})(\d{10,12})(\b)'
+        replacement: '$1******$3'
+      # ICCID numbers
+      - field_hint: iccid
+        pattern: '(\b89\d{4})(\d{6,11})(\d{2}\b)'
+        replacement: '$1******$3'
+      # MAC addresses
+      - field_hint: mac
+        pattern: '\b([0-9A-Fa-f]{2})(:[0-9A-Fa-f]{2}){5}\b'
+        replacement: '$1:xx:xx:xx:xx:xx'
+      # UUID
+      - field_hint: uuid
+        pattern: '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b'
+        replacement: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+      # Geographic coordinates (preserve first 2 decimal places)
+      - field_hint: geo_coord
+        pattern: '(\b-?(?:[1-9]?\d|1[0-7]\d)\.\d{2})\d+(\s*,\s*)(-?(?:[1-9]?\d|1[0-7]\d)\.\d{2})\d+\b'
+        replacement: '$1$2$3'
+
+  # IP address generalization with hashing
+  - name: ip-generalize
+    type: regex
+    action: mask_and_hash
+    patterns:
+      # IPv4 addresses
+      - '(?<![0-9])((?:\d{1,3}\.){3}\d{1,3})(?![0-9])'
+      # IPv6 addresses
+      - '([A-Fa-f0-9:]{2,}:[A-Fa-f0-9:]+)'
+
+  # URL credentials masking
+  - name: url-userpass
+    type: regex
+    action: mask
+    patterns:
+      - '(?i)\b([a-z]+:\/\/)([^:@\/\s]{1,})(:)([^@\/\s]{1,})(@)'
+    replacement: '$1$2:$3***$5'
+
+  # API keys and service tokens
+  - name: api-keys
+    type: regex
+    action: mask
+    patterns:
+      # AWS Access Keys
+      - '(?i)(AKIA[0-9A-Z]{16})'
+      - '(?i)aws_secret_access_key\s*=\s*([A-Za-z0-9\/+=]{30,})'
+      # GitHub tokens
+      - '(?i)ghp_[A-Za-z0-9]{36,}'
+      # GitLab tokens
+      - '(?i)glpat-[A-Za-z0-9_\-]{20,}'
+      # Slack tokens
+      - '(?i)xox[abpr]-[A-Za-z0-9-]{10,}'
+      # Stripe keys
+      - '(?i)sk_live_[A-Za-z0-9]{24,}'
+      # Telegram bot tokens
+      - '(?i)(tg|telegram)_bot_token[=:]\s*[0-9]{6,12}:[A-Za-z0-9_\-]{20,}'
+      # Discord tokens
+      - '(?i)discord(app)?_token[=:]\s*[A-Za-z0-9\._\-]{20,}'
+      # OpenAI API keys
+      - '(?i)openai[-_]key[=:]\s*sk-[A-Za-z0-9]{20,}'
+      # Generic API keys
+      - '(?i)api[_-]?key"?:\s*"[A-Za-z0-9\-_]{16,}"'
+    replacement: '[KEY***]'
+
+# Performance and safety settings
+performance:
+  chunk_size: 8192
+  max_memory_mb: 512
+  timeout_seconds: 30
+
+# Logging and monitoring
+logging:
+  level: INFO
+  include_stats: true
+  log_redacted_fields: false

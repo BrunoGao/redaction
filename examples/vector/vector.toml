@@ -1,0 +1,183 @@
+# Vector configuration for log redaction
+# https://vector.dev/docs/
+
+[sources.app_logs]
+  type = "file"
+  include = ["/var/log/app/*.log"]
+  ignore_older_secs = 86400
+  read_from = "beginning"
+  fingerprint.strategy = "device_and_inode"
+
+[sources.nginx_logs]
+  type = "file"
+  include = ["/var/log/nginx/access.log", "/var/log/nginx/error.log"]
+  ignore_older_secs = 86400
+  read_from = "beginning"
+
+[sources.syslog]
+  type = "syslog"
+  address = "0.0.0.0:514"
+  mode = "udp"
+
+# Parse JSON logs
+[transforms.parse_json]
+  type = "remap"
+  inputs = ["app_logs"]
+  source = '''
+    if is_string(.message) {
+      parsed = parse_json(.message) ?? {}
+      . = merge(., parsed)
+    }
+  '''
+
+# Parse nginx logs
+[transforms.parse_nginx]
+  type = "remap"
+  inputs = ["nginx_logs"]
+  source = '''
+    parsed, err = parse_regex(.message, r'^(?P<remote_addr>[^ ]*) (?P<remote_user>[^ ]*) \[(?P<time_local>[^\]]*)\] "(?P<request>[^"]*)" (?P<status>[^ ]*) (?P<body_bytes_sent>[^ ]*)(?: "(?P<http_referer>[^"]*)" "(?P<http_user_agent>[^"]*)")?')
+    if err == null {
+      . = merge(., parsed)
+    }
+  '''
+
+# Redaction using external script
+[transforms.redact_app_logs]
+  type = "remap"
+  inputs = ["parse_json"]
+  source = '''
+    # Convert to single line JSON for processing
+    line = encode_json(.)
+    
+    # Note: In production, use exec transform or external service
+    # This is a simplified example
+    .redacted = true
+    .original_size = length(line)
+  '''
+
+[transforms.redact_nginx_logs]
+  type = "remap"
+  inputs = ["parse_nginx"]
+  source = '''
+    # Redact IP addresses
+    if exists(.remote_addr) {
+      .remote_addr = redact_ip(.remote_addr)
+    }
+    
+    # Redact user agents
+    if exists(.http_user_agent) {
+      .http_user_agent = redact_user_agent(.http_user_agent)
+    }
+    
+    .redacted = true
+  '''
+
+# Alternative: Use exec transform for external redaction script
+[transforms.external_redact]
+  type = "exec"
+  inputs = ["app_logs"]
+  command = ["python3", "/opt/redact.py", "--rules", "/opt/redaction-rules.yaml"]
+  working_directory = "/opt"
+
+# Add metadata
+[transforms.add_metadata]
+  type = "remap"
+  inputs = ["redact_app_logs", "redact_nginx_logs", "external_redact"]
+  source = '''
+    .redacted_timestamp = now()
+    .redacted_by = "vector-redactor"
+    .vector_version = get_env_var("VECTOR_VERSION") ?? "unknown"
+  '''
+
+# Buffer for performance
+[transforms.buffer]
+  type = "buffer"
+  inputs = ["add_metadata"]
+  max_events = 1000
+  when_full = "block"
+
+# Output to Elasticsearch
+[sinks.elasticsearch]
+  type = "elasticsearch"
+  inputs = ["buffer"]
+  endpoints = ["http://elasticsearch.local:9200"]
+  index = "security-logs-redacted-%Y-%m-%d"
+  doc_type = "_doc"
+  
+  # Authentication
+  auth.strategy = "basic"
+  auth.user = "elastic"
+  auth.password = "${ELASTIC_PASSWORD}"
+  
+  # Compression and batching
+  compression = "gzip"
+  batch.max_events = 100
+  batch.timeout_secs = 5
+
+# Output to file (backup)
+[sinks.file_backup]
+  type = "file"
+  inputs = ["buffer"]
+  path = "/var/log/redacted/security-%Y-%m-%d.log"
+  encoding.codec = "json"
+  
+  # Compression
+  compression = "gzip"
+
+# Output to Kafka (optional)
+[sinks.kafka]
+  type = "kafka"
+  inputs = ["buffer"]
+  bootstrap_servers = "kafka.local:9092"
+  topic = "security-logs-redacted"
+  encoding.codec = "json"
+  
+  # Security
+  sasl.enabled = true
+  sasl.mechanism = "PLAIN"
+  sasl.username = "${KAFKA_USERNAME}"
+  sasl.password = "${KAFKA_PASSWORD}"
+
+# Metrics and monitoring
+[sinks.prometheus]
+  type = "prometheus_exporter"
+  inputs = []
+  address = "0.0.0.0:9598"
+  default_namespace = "vector"
+
+# Console output for debugging
+[sinks.console]
+  type = "console"
+  inputs = ["buffer"]
+  encoding.codec = "json"
+  target = "stdout"
+
+# Custom VRL functions for redaction
+[transforms.redaction_functions]
+  type = "remap"
+  inputs = []
+  source = '''
+    # Custom function to redact IP addresses
+    redact_ip = |ip| {
+      if is_ipv4(ip) {
+        parts = split(ip, ".")
+        if length(parts) == 4 {
+          return join([parts[0], parts[1], parts[2], "xxx"], ".")
+        }
+      }
+      return "xxx.xxx.xxx.xxx"
+    }
+    
+    # Custom function to redact user agents
+    redact_user_agent = |ua| {
+      # Keep browser name, redact version details
+      if contains(ua, "Chrome") {
+        return "Chrome/***"
+      } else if contains(ua, "Firefox") {
+        return "Firefox/***"
+      } else if contains(ua, "Safari") {
+        return "Safari/***"
+      }
+      return "Unknown/***"
+    }
+  '''

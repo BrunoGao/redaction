@@ -1,0 +1,171 @@
+version: '3.8'
+
+services:
+  # Log redaction service
+  log-redactor:
+    build:
+      context: ../..
+      dockerfile: examples/docker/Dockerfile
+    container_name: log-redactor
+    volumes:
+      - ./config:/etc/redactor:ro
+      - /var/log:/var/log:ro
+      - ./output:/var/log/redacted:rw
+      - /tmp:/tmp:rw
+    environment:
+      - REDACT_SALT=${REDACT_SALT}
+      - PYTHONUNBUFFERED=1
+    command: ["--rules", "/etc/redactor/redaction-rules.yaml", "--stats"]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Fluent Bit for log collection and processing
+  fluent-bit:
+    image: fluent/fluent-bit:latest
+    container_name: fluent-bit-redactor
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - /var/log:/var/log:ro
+      - ./redact.py:/opt/redact.py:ro
+      - ./redaction-rules.yaml:/opt/redaction-rules.yaml:ro
+    environment:
+      - REDACT_SALT=${REDACT_SALT}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+    ports:
+      - "2020:2020"  # HTTP server
+      - "24224:24224"  # Forward input
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+
+  # Vector for log processing
+  vector:
+    image: timberio/vector:latest-alpine
+    container_name: vector-redactor
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+      - /var/log:/var/log:ro
+      - ./redact.py:/opt/redact.py:ro
+      - ./redaction-rules.yaml:/opt/redaction-rules.yaml:ro
+    environment:
+      - REDACT_SALT=${REDACT_SALT}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - VECTOR_VERSION=latest
+    ports:
+      - "9598:9598"  # Prometheus metrics
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+
+  # Logstash for log processing
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: logstash-redactor
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ./redact.py:/opt/redact.py:ro
+      - ./redaction-rules.yaml:/opt/redaction-rules.yaml:ro
+      - /var/log:/var/log:ro
+    environment:
+      - REDACT_SALT=${REDACT_SALT}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - LS_JAVA_OPTS=-Xmx1g -Xms1g
+    ports:
+      - "5044:5044"  # Beats input
+      - "514:514/udp"  # Syslog input
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+
+  # Elasticsearch for storing redacted logs
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: elasticsearch-redacted
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    restart: unless-stopped
+
+  # Kibana for log visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: kibana-redacted
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+
+  # Kafka for log streaming (optional)
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka-logs
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    restart: unless-stopped
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper-logs
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:alpine
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  # Monitoring with Prometheus and Grafana
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-monitoring
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-monitoring
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  es-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  default:
+    name: log-redaction-network
